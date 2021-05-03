@@ -81,6 +81,6 @@ arg3 = default value
 
 Licensing
 =========
-Unless otherwise noted, all the code in this repository is licensed under the GNU General Public License, Version 2 (GPLv2) ONLY.  If you find yourself in the extraordinarily 
+Unless otherwise noted, all the code in this repository is licensed under the LGPLv2 ONLY.  If you find yourself in the extraordinarily 
 unusual situation of needing to use my code under a more permissive license, send me an email, and we'll see if we can work something out.  I'm a pretty nice guy, so don't be 
 afraid to speak up (so long as you're polite).
