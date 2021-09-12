@@ -39,13 +39,18 @@ class CmdArg:
         self.action = "store_true" if self.type == bool else "store"
     
     def get_argparse_kwargs(self):
-        return {
+        retval = {
             'help': self.desc,
             'required': self.required,
             'dest': self.name,
-            'type': self.parser,
             'action': self.action
         }
+
+        if self.action == "store":
+            retval['type'] = self.parser
+
+        return retval
+
 
 
 class MLArgParser:
