@@ -31,9 +31,10 @@ class CmdArg:
     action = ""
     
     def __init__(self, signature, desc):
+        not_func = lambda x: not x
         self.name = signature.name
         self.type = signature.annotation
-        self.parser = ast.literal_eval if self.type in AST_TYPES else self.type
+        self.parser = ast.literal_eval if self.type in AST_TYPES else not_func if self.type == bool else self.type
         self.desc = desc
         self.required = False if self.type == bool else (signature.default == inspect.Parameter.empty)
         self.action = "store_true" if self.type == bool else "store"
