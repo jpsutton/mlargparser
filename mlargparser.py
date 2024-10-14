@@ -31,13 +31,29 @@ class CmdArg:
     action = ""
     
     def __init__(self, signature, desc):
-        not_func = lambda x: not x
         self.name = signature.name
         self.type = signature.annotation
-        self.parser = ast.literal_eval if self.type in AST_TYPES else not_func if self.type == bool else self.type
+        self.parser = ast.literal_eval if self.type in AST_TYPES else self.type
         self.desc = desc
         self.required = False if self.type == bool else (signature.default == inspect.Parameter.empty)
-        self.action = "store_true" if self.type == bool else "store"
+
+        # Booleans need special hand-holding
+        if self.type == bool:
+            if self.name.startswith("no_"):
+                self.action = "store_false"
+
+                if signature.default == True:
+                    self.desc = f"Explicitly do not {self.desc[0].lower()}{self.desc[1:]}"
+            else:
+                self.action = "store_true"
+
+                if signature.defaukt == True:
+                    self.desc = f"{self.desc} [default]"
+        else:
+            self.action = "store"
+
+            if signature.default != inspeact.Parameter.empty:
+                self.desc += f' [default: "{signature.default}"]'
     
     def get_argparse_kwargs(self):
         retval = {
@@ -49,6 +65,10 @@ class CmdArg:
 
         if self.action == "store":
             retval['type'] = self.parser
+
+        # Explicit disable boolean args should reference their enable flag value instead
+        if self.type == bool and self.name.startswith("no_"):
+            retval.dest = self.name[3:]
 
         return retval
 
@@ -228,7 +248,11 @@ class MLArgParser:
                 desc = self.argDesc[arg.name]
             
             # Yield an argument object back to the caller
-            yield CmdArg(arg, desc)
+            yield CmdArg(arg, desc), arg.default
+
+            # If a boolean flag is set to True by default, create a corresponding explicit disable flag
+            if arg.annotation == bool and arg.default == True:
+                yield CmdArg(arg.replace(name = f"no_{arg.name}"), desc), None
     
     def __get_cmd_parser(self, command_callable):
         # Offset the level from the one passed to the constructor (to skip parsing the previous command)
@@ -240,9 +264,10 @@ class MLArgParser:
             usage=(("%s " * level) + "[<args>]") % tuple(sys.argv[0:level])
         )
         req_args_grp = parser.add_argument_group("required arguments")
+        defaults = dict()
         
         # populate the parser with the arg and type information from the function
-        for arg in self.__get_arg_properties(command_callable):
+        for arg, default_val in self.__get_arg_properties(command_callable):
             # determine the long and/or short option names for the argument
             options = self.__get_options_for_arg(arg.name)
             
@@ -254,6 +279,13 @@ class MLArgParser:
             
             # add the argument to the appropriate group
             grp.add_argument(*options, **kwargs)
+
+            # build a list of default args for the parser object
+            if default_val is not None:
+                defaults[arg.name] = default_val
+
+        # set default values
+        parser.set_defaults(**defaults)
         
         return parser
 
