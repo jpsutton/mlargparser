@@ -42,7 +42,7 @@ class CmdArg:
             if self.name.startswith("no_"):
                 self.action = "store_false"
 
-                if signature.default == True:
+                if self.desc != STR_UNDOCUMENTED and signature.default == True:
                     self.desc = f"Explicitly do not {self.desc[0].lower()}{self.desc[1:]}"
             else:
                 self.action = "store_true"
