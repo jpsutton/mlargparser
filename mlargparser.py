@@ -47,7 +47,7 @@ class CmdArg:
             else:
                 self.action = "store_true"
 
-                if signature.defaukt == True:
+                if signature.default == True:
                     self.desc = f"{self.desc} [default]"
         else:
             self.action = "store"
