@@ -52,7 +52,7 @@ class CmdArg:
         else:
             self.action = "store"
 
-            if signature.default != inspeact.Parameter.empty:
+            if signature.default != inspect.Parameter.empty:
                 self.desc += f' [default: "{signature.default}"]'
     
     def get_argparse_kwargs(self):
