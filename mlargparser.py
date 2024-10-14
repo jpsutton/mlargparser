@@ -68,7 +68,7 @@ class CmdArg:
 
         # Explicit disable boolean args should reference their enable flag value instead
         if self.type == bool and self.name.startswith("no_"):
-            retval.dest = self.name[3:]
+            retval['dest'] = self.name[3:]
 
         return retval
 
