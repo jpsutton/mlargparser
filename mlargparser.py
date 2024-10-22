@@ -67,11 +67,13 @@ class CmdArg:
             'required': self.required,
             'dest': self.name,
             'action': self.action,
-            'nargs': self.nargs,
         }
 
         if self.action in ("store", "append"):
             retval['type'] = self.parser
+
+        if self.action == "append":
+            retval['nargs'] = self.nargs
 
         # Explicit disable boolean args should reference their enable flag value instead
         if self.type == bool and self.name.startswith("no_"):
