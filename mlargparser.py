@@ -12,6 +12,7 @@ import ast
 import inspect
 
 from io import StringIO
+from types import GenericAlias
 
 # string to use for undocumented commands/arguments
 STR_UNDOCUMENTED = "FIXME: UNDOCUMENTED"
@@ -29,6 +30,7 @@ class CmdArg:
     type = None
     required = False
     action = ""
+    nargs = 1
     
     def __init__(self, signature, desc):
         self.name = signature.name
@@ -49,6 +51,10 @@ class CmdArg:
 
                 if signature.default == True:
                     self.desc = f"{self.desc} [default]"
+        elif type(self.type) == GenericAlias and typoe(self.type()) == list:
+            self.parser = self.type.__args__[0]
+            self.action = "append"
+            self.nargs = "+"
         else:
             self.action = "store"
 
@@ -60,10 +66,11 @@ class CmdArg:
             'help': self.desc,
             'required': self.required,
             'dest': self.name,
-            'action': self.action
+            'action': self.action,
+            'nargs': self.nargs,
         }
 
-        if self.action == "store":
+        if self.action in ("store", "append"):
             retval['type'] = self.parser
 
         # Explicit disable boolean args should reference their enable flag value instead
@@ -281,7 +288,7 @@ class MLArgParser:
             grp.add_argument(*options, **kwargs)
 
             # build a list of default args for the parser object
-            if default_val is not None:
+            if default_val not in (None, inspect._empty):
                 defaults[arg.name] = default_val
 
         # set default values
