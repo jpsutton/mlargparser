@@ -177,9 +177,21 @@ class MLArgParser:
         finally:
             sys.stderr = stderr
         
-        # iterate through the args and remove any that weren't specified
         for key in list(func_args.keys()):
-            func_args.pop(key) if func_args[key] is None else None
+            # remove any args that weren't specified
+            if func_args[key] is None:
+                func_args.pop(key)
+                continue
+
+            # Look for any list-based arguments, and flatten them
+            try:
+                action = next(
+                    filter(lambda x: getattr(x, 'dest') == key and getattr(x, 'nargs') == "+", cmd_parser._actions)
+                )
+                if len(func_args[key]):
+                    func_args[key] = [x[0] for x in func_args[key]]
+            except StopIteration:
+                pass
         
         return func_args
     
