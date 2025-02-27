@@ -1,6 +1,6 @@
 [project]
 name = "mlargparser"
-version = "0.8"
+version = "0.9"
 authors = [
   { name="Jared Sutton", email="jpsutton@gmail.com" },
 ]
