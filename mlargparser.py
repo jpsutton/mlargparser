@@ -51,7 +51,7 @@ class CmdArg:
 
                 if signature.default == True:
                     self.desc = f"{self.desc} [default]"
-        elif type(self.type) == GenericAlias and typoe(self.type()) == list:
+        elif type(self.type) == GenericAlias and type(self.type()) == list:
             self.parser = self.type.__args__[0]
             self.action = "append"
             self.nargs = "+"
