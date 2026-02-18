@@ -14,6 +14,13 @@ import inspect
 from io import StringIO
 from types import GenericAlias
 
+# Try to import typing inspection utilities (Python 3.8+)
+try:
+    from typing import get_origin, get_args
+    HAS_TYPING_INSPECT = True
+except ImportError:
+    HAS_TYPING_INSPECT = False
+
 # string to use for undocumented commands/arguments
 STR_UNDOCUMENTED = "FIXME: UNDOCUMENTED"
 
@@ -32,10 +39,99 @@ class CmdArg:
     action = ""
     nargs = 1
     
+    def __normalize_type_annotation(self, annotation):
+        """
+        Convert a type annotation to a callable parser function.
+        
+        Args:
+            annotation: The type annotation from function signature
+            
+        Returns:
+            A callable that can parse string input to the desired type
+            
+        Raises:
+            ValueError: If annotation cannot be converted to a parser
+        """
+        # Handle missing annotation
+        if annotation == inspect.Parameter.empty:
+            return str  # default to string
+        
+        # Handle None
+        if annotation is None:
+            return str
+        
+        # Handle string annotations (forward references)
+        if isinstance(annotation, str):
+            # Try to evaluate in common namespaces
+            try:
+                import builtins
+                annotation = getattr(builtins, annotation)
+            except AttributeError:
+                raise ValueError(f"Cannot resolve string annotation: {annotation}")
+        
+        # Handle typing module types
+        # Use typing inspection utilities if available (Python 3.8+)
+        if HAS_TYPING_INSPECT:
+            origin = get_origin(annotation)
+            if origin is not None:
+                args = get_args(annotation)
+                # Handle Optional[T] / Union[T, None]
+                # Optional[T] is equivalent to Union[T, None]
+                try:
+                    from typing import Union
+                    if origin is Union:
+                        if args:
+                            # Get first non-None type
+                            for arg in args:
+                                if arg is not type(None):
+                                    return self.__normalize_type_annotation(arg)
+                except ImportError:
+                    pass
+                
+                # Handle List[T], Set[T], Tuple[T], etc.
+                if origin in (list, set, tuple, dict):
+                    if args:
+                        return self.__normalize_type_annotation(args[0])
+                    return origin
+        elif hasattr(annotation, '__origin__'):
+            # Fallback for older Python versions or typing module without get_origin
+            origin = getattr(annotation, '__origin__', None)
+            args = getattr(annotation, '__args__', ())
+            
+            # Handle Optional[T] / Union[T, None]
+            if str(annotation).startswith('typing.Union') or str(annotation).startswith('typing.Optional'):
+                if args:
+                    # Get first non-None type
+                    for arg in args:
+                        if arg is not type(None):
+                            return self.__normalize_type_annotation(arg)
+            
+            # For List[T], Set[T], etc., extract T
+            if origin in (list, set, tuple, dict):
+                if args:
+                    return self.__normalize_type_annotation(args[0])
+                return origin
+        
+        # Handle AST types
+        if annotation in AST_TYPES:
+            return ast.literal_eval
+        
+        # Verify it's callable
+        if not callable(annotation):
+            raise ValueError(f"Type annotation {annotation} is not callable")
+        
+        return annotation
+    
     def __init__(self, signature, desc):
         self.name = signature.name
         self.type = signature.annotation
-        self.parser = ast.literal_eval if self.type in AST_TYPES else self.type
+        
+        try:
+            self.parser = self.__normalize_type_annotation(self.type)
+        except ValueError as e:
+            # Provide helpful error message with parameter name
+            raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
+        
         self.desc = desc
         self.required = False if self.type == bool else (signature.default == inspect.Parameter.empty)
 
@@ -95,7 +191,7 @@ class MLArgParser:
     # list for tracking auto-generated short options (initialized in __get_cmd_parser)
     short_options = None
     
-    def __init__(self, level=1, parent=None, top=None, noparse=False):
+    def __init__(self, level=1, parent=None, top=None, noparse=False, strict_types=True):
         # indicate how many command-levels deep we are
         self.level = level
         
@@ -104,6 +200,9 @@ class MLArgParser:
         
         # keep track of our top-level command
         self.top = top if level > 1 else self
+        
+        # strict_types: if True, raise exceptions for invalid annotations; if False, skip with warning
+        self.strict_types = strict_types
         
         if noparse:
             return
@@ -214,6 +313,19 @@ class MLArgParser:
             attr = getattr(self, attr_name)
             
             if callable(attr) and not attr_name.startswith("_"):
+                # Validate command signatures early
+                if not isinstance(attr, type):  # Skip subcommand classes
+                    try:
+                        sig = inspect.signature(attr)
+                        for param in sig.parameters.values():
+                            # This will raise ValueError if annotation is invalid
+                            CmdArg(param, self.argDesc.get(param.name, STR_UNDOCUMENTED) if self.argDesc else STR_UNDOCUMENTED)
+                    except ValueError as e:
+                        if self.strict_types:
+                            raise
+                        print(f"Warning: Skipping command '{attr_name}': {e}", file=sys.stderr)
+                        continue
+                
                 self.commands[attr_name.lower()] = (attr_name, attr)
     
     def __get_epilog_str(self):
