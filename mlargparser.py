@@ -11,7 +11,6 @@ import os
 import ast
 import inspect
 
-from io import StringIO
 from types import GenericAlias
 
 # Try to import typing inspection utilities (Python 3.8+)
@@ -253,28 +252,15 @@ class MLArgParser:
         # get a parser object for the command function
         cmd_parser = self.__get_cmd_parser(command_callable)
         
-        # try to extract a list of args for the command
+        # Parse arguments without stderr hijacking
         try:
-            # Redirect stderr so we can catch and process output from argparse
-            stderr = sys.stderr
-            sys.stderr = StringIO()
-            
-            # Parse the arguments
             parsed = cmd_parser.parse_args(sys.argv[self.level + 1:])
             func_args = vars(parsed)
-        except SystemExit as exit_signal:
-            parser_output = sys.stderr.getvalue()
-            
-            # Nastiness ahead...
-            if parser_output.find("error: the following arguments are required:") != -1:
-                cmd_parser.print_help()
-                stderr.write('\n%s\n' % '\n'.join(parser_output.split('\n')[1:]))
-            else:
-                stderr.write(parser_output)
-            
-            raise exit_signal
-        finally:
-            sys.stderr = stderr
+        except argparse.ArgumentError as e:
+            # Print help and error message
+            cmd_parser.print_help()
+            print(f"\nError: {e}", file=sys.stderr)
+            sys.exit(2)
         
         for key in list(func_args.keys()):
             # remove any args that weren't specified
@@ -394,7 +380,8 @@ class MLArgParser:
         # create a parser for the command and a group to track required args
         parser = argparse.ArgumentParser(
             description=inspect.getdoc(command_callable),
-            usage=(("%s " * level) + "[<args>]") % tuple(sys.argv[0:level])
+            usage=(("%s " * level) + "[<args>]") % tuple(sys.argv[0:level]),
+            exit_on_error=False  # New in Python 3.9
         )
         req_args_grp = parser.add_argument_group("required arguments")
         defaults = dict()
