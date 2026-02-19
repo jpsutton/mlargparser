@@ -20,6 +20,12 @@ try:
 except ImportError:
     HAS_TYPING_INSPECT = False
 
+    def get_origin(tp):
+        return getattr(tp, '__origin__', None)
+
+    def get_args(tp):
+        return getattr(tp, '__args__', ())
+
 # string to use for undocumented commands/arguments
 STR_UNDOCUMENTED = "FIXME: UNDOCUMENTED"
 
@@ -120,39 +126,122 @@ class CmdArg:
             raise ValueError(f"Type annotation {annotation} is not callable")
         
         return annotation
+
+    def __is_collection_type(self, annotation):
+        """
+        Check if annotation is a collection type (list, set, tuple).
+
+        Supported: list[T], List[T], set[T], Set[T], tuple[T, ...], Optional[List[T]].
+        Limitations: Nested generics (e.g. List[List[int]]) are treated as
+        list of inner type; Tuple[int, str, bool] uses first type only.
+
+        Returns:
+            tuple: (is_collection, origin_type, element_type) or (False, None, None)
+        """
+        origin = get_origin(annotation)
+
+        # Handle Optional[T] / Union[T, None] - unwrap and recurse
+        if origin is not None:
+            try:
+                from typing import Union
+                if origin is Union:
+                    args = get_args(annotation)
+                    if args:
+                        # Get first non-None type and recurse
+                        non_none_args = [arg for arg in args if arg is not type(None)]
+                        if non_none_args:
+                            return self.__is_collection_type(non_none_args[0])
+            except ImportError:
+                pass
+
+        # Handle builtin generics (Python 3.9+): list[str], set[int], etc.
+        if isinstance(annotation, GenericAlias):
+            origin = annotation.__origin__
+            args = getattr(annotation, '__args__', ())
+            if origin in (list, set, tuple):
+                element_type = args[0] if args else str
+                return True, origin, element_type
+
+        # Handle typing module generics: List[str], Set[int], etc.
+        if origin is not None and origin in (list, set, tuple):
+            args = get_args(annotation)
+            element_type = args[0] if args else str
+            return True, origin, element_type
+
+        return False, None, None
+
+    def __get_parser_for_type(self, type_annotation):
+        """
+        Get a parser function for a type annotation.
+
+        Handles Optional[T]/Union[T, None] by extracting T. Complex unions
+        (Union[int, str]) use the first type only.
+
+        Args:
+            type_annotation: The type to create a parser for
+
+        Returns:
+            A callable that can parse string input
+        """
+        # Handle missing annotation
+        if type_annotation == inspect.Parameter.empty:
+            return str
+
+        # Handle AST-evaluable types
+        if type_annotation in AST_TYPES:
+            return ast.literal_eval
+
+        # Handle typing module Optional/Union
+        origin = get_origin(type_annotation)
+        if origin is not None:
+            args = get_args(type_annotation)
+            if args:
+                non_none_args = [arg for arg in args if arg is not type(None)]
+                if non_none_args:
+                    return self.__get_parser_for_type(non_none_args[0])
+
+        # Delegate to full normalization (string annotations, etc.)
+        return self.__normalize_type_annotation(type_annotation)
     
     def __init__(self, signature, desc):
         self.name = signature.name
         self.type = signature.annotation
-        
-        try:
-            self.parser = self.__normalize_type_annotation(self.type)
-        except ValueError as e:
-            # Provide helpful error message with parameter name
-            raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
-        
         self.desc = desc
-        self.required = False if self.type == bool else (signature.default == inspect.Parameter.empty)
 
-        # Booleans need special hand-holding
-        if self.type == bool:
-            if self.name.startswith("no_"):
-                self.action = "store_false"
+        # Check if it's a collection type (list, set, tuple)
+        is_collection, origin, element_type = self.__is_collection_type(self.type)
 
-                if self.desc != STR_UNDOCUMENTED and signature.default == True:
-                    self.desc = f"Explicitly do not {self.desc[0].lower()}{self.desc[1:]}"
-            else:
-                self.action = "store_true"
-
-                if signature.default == True:
-                    self.desc = f"{self.desc} [default]"
-        elif type(self.type) == GenericAlias and type(self.type()) == list:
-            self.parser = self.type.__args__[0]
+        if is_collection:
+            try:
+                self.parser = self.__get_parser_for_type(element_type)
+            except ValueError as e:
+                raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
             self.action = "append"
             self.nargs = "+"
+            self.required = signature.default == inspect.Parameter.empty
+        elif self.type == bool:
+            # Boolean handling
+            self.parser = None
+            self.required = False
+            if self.name.startswith("no_"):
+                self.action = "store_false"
+                if self.desc != STR_UNDOCUMENTED and signature.default == True:
+                    base_name = self.name[3:]
+                    self.desc = f"Explicitly disable {base_name.replace('_', ' ')}"
+            else:
+                self.action = "store_true"
+                if signature.default == True:
+                    self.desc = f"{self.desc} [enabled by default]"
+                elif signature.default == False:
+                    self.desc = f"{self.desc} [disabled by default]"
         else:
+            # Regular type handling
+            try:
+                self.parser = self.__get_parser_for_type(self.type)
+            except ValueError as e:
+                raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
             self.action = "store"
-
+            self.required = signature.default == inspect.Parameter.empty
             if signature.default != inspect.Parameter.empty:
                 self.desc += f' [default: "{signature.default}"]'
     
@@ -179,7 +268,25 @@ class CmdArg:
 
 
 class MLArgParser:
-    __doc__ = STR_UNDOCUMENTED
+    """
+    Multi-level argument parser for creating CLI applications with subcommands.
+    
+    Boolean Parameter Conventions:
+    ------------------------------
+    - Boolean parameters with False defaults create --flag options (store_true)
+    - Boolean parameters with True defaults create both:
+        * --flag option (enabled by default)
+        * --no-flag option (explicit disable)
+    - Parameters starting with "no_" are treated as disable flags (store_false)
+    - Set auto_disable_flags = False to disable automatic --no-* flag generation
+    
+    Example:
+        def my_command(self, verbose: bool = False, cache: bool = True):
+            '''My command'''
+            pass
+        
+        # Creates: --verbose (store_true), --cache (store_true), --no-cache (store_false)
+    """
     
     # mapping of command arguments to descriptions (initialized in constructor)
     argDesc = None
@@ -189,6 +296,8 @@ class MLArgParser:
     
     # list for tracking auto-generated short options (initialized in __get_cmd_parser)
     short_options = None
+    
+    auto_disable_flags = True
     
     def __init__(self, level=1, parent=None, top=None, noparse=False, strict_types=True):
         # indicate how many command-levels deep we are
@@ -268,13 +377,17 @@ class MLArgParser:
                 func_args.pop(key)
                 continue
 
-            # Look for any list-based arguments, and flatten them
+            # Look for any append (list/set/tuple) arguments, and flatten nested lists
             try:
                 action = next(
-                    filter(lambda x: getattr(x, 'dest') == key and getattr(x, 'nargs') == "+", cmd_parser._actions)
+                    filter(lambda x: (getattr(x, 'dest') == key and 
+                                     (getattr(x, 'nargs', None) == '+' or 
+                                      x.__class__.__name__.endswith('AppendAction'))),
+                           cmd_parser._actions)
                 )
-                if len(func_args[key]):
-                    func_args[key] = [x[0] for x in func_args[key]]
+                if func_args[key] and isinstance(func_args[key], list):
+                    if func_args[key] and isinstance(func_args[key][0], list):
+                        func_args[key] = [item for sublist in func_args[key] for item in sublist]
             except StopIteration:
                 pass
         
@@ -303,6 +416,7 @@ class MLArgParser:
                 if not isinstance(attr, type):  # Skip subcommand classes
                     try:
                         sig = inspect.signature(attr)
+                        self.__validate_boolean_params(sig, attr_name)
                         for param in sig.parameters.values():
                             # This will raise ValueError if annotation is invalid
                             CmdArg(param, self.argDesc.get(param.name, STR_UNDOCUMENTED) if self.argDesc else STR_UNDOCUMENTED)
@@ -313,6 +427,28 @@ class MLArgParser:
                         continue
                 
                 self.commands[attr_name.lower()] = (attr_name, attr)
+    
+    def __validate_boolean_params(self, signature, command_name):
+        """Validate boolean parameter naming to avoid conflicts."""
+        param_names = list(signature.parameters.keys())
+        
+        for param_name in param_names:
+            param = signature.parameters[param_name]
+            
+            if param.annotation == bool:
+                if param_name.startswith("no_no_"):
+                    raise ValueError(
+                        f"Parameter '{param_name}' uses double negative 'no_no_' prefix. "
+                        f"Consider renaming to avoid confusion."
+                    )
+                
+                if param_name.startswith("no_"):
+                    base_name = param_name[3:]
+                    if base_name in param_names:
+                        raise ValueError(
+                            f"Both '{base_name}' and '{param_name}' parameters exist. "
+                            f"This creates ambiguous flag behavior. Use only one."
+                        )
     
     def __get_epilog_str(self):
         # start with a header
@@ -358,20 +494,39 @@ class MLArgParser:
             return long_option,
     
     def __get_arg_properties(self, command_callable):
-        # Iterate through each parameter in the callable's signature
-        for arg in inspect.signature(command_callable).parameters.values():
-            # Determine if we have a description for the parameter, if not use the default text
+        """
+        Iterate through parameters and yield CmdArg objects.
+        
+        For boolean parameters with True defaults, automatically creates
+        a corresponding --no-* flag for explicit disabling.
+        """
+        sig = inspect.signature(command_callable)
+        param_names = set(sig.parameters.keys())
+        
+        for arg in sig.parameters.values():
             if self.argDesc is None or arg.name not in self.argDesc:
                 desc = STR_UNDOCUMENTED
             else:
                 desc = self.argDesc[arg.name]
             
-            # Yield an argument object back to the caller
             yield CmdArg(arg, desc), arg.default
-
-            # If a boolean flag is set to True by default, create a corresponding explicit disable flag
-            if arg.annotation == bool and arg.default == True:
-                yield CmdArg(arg.replace(name = f"no_{arg.name}"), desc), None
+            
+            if self.auto_disable_flags and arg.annotation == bool and arg.default == True:
+                no_name = f"no_{arg.name}"
+                
+                if no_name in param_names:
+                    print(
+                        f"Warning: Skipping auto-generation of '--{no_name.replace('_', '-')}' "
+                        f"flag because parameter '{no_name}' is explicitly defined.",
+                        file=sys.stderr
+                    )
+                    continue
+                
+                # Don't create no_no_* flags (double negatives)
+                if arg.name.startswith("no_"):
+                    continue
+                
+                yield CmdArg(arg.replace(name=no_name), desc), None
     
     def __get_cmd_parser(self, command_callable):
         # Offset the level from the one passed to the constructor (to skip parsing the previous command)
