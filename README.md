@@ -1,86 +1,204 @@
-MLArgParser
-===========
-MLArgParser is a Multi-Level Argument Parser library for writing CLI-based applications.  Object-oriented Programming concepts such as instance methods, sub-classes, and method arguments are mapped directly to CLI commands, sub-commands, and command arguments respectively.
+# MLArgParser
 
-Additionally, Python docstrings on methods/classes, default values on method parameters, and a simple dictionary are used to automatically build help output, which is formatted in a standard way.  Finally, type-hinting (PEP-484) is utilized to allow the library to automatically convert user-provided CLI parameters to the correct data-types expected by your code; most every-day Python data types (strings, integers, booleans, lists, dictionaries, and sets) are all supported as CLI-provided parameters.
+MLArgParser is a multi-level argument parser for building CLI applications in Python. It maps object-oriented concepts directly to the command line: subclasses become subcommands, methods become commands, and method parameters become command-line arguments. Type hints and docstrings drive help text and type conversion automatically.
 
-The over-arching idea here is that app developers don't like spending lots of time building user-facing documentation (like help output) or building the code necessary to properly parse input data. In fact, parsing CLI input tends to be rather tedious and error-proned. This library is intended to allow the developer to take a break from having to deal with parsing and documentation details, and does so by forcing the developer to write code which is easier to understand (self-documenting) and structured in a way which closely matches the way the user interacts with the application.
+**Requirements:** Python 3.8+ (3.9+ recommended for `exit_on_error=False` and built-in generics like `list[str]`).
 
 
-Example
-=======
+## Design
+
+- **Commands** are the public methods of your parser class (names not starting with `_`).
+- **Arguments** are the parameters of those methods; names and types come from the signature.
+- **Help text** comes from the class/method docstrings and from the `arg_desc` dictionary.
+- **Subcommands** are implemented by assigning another `MLArgParser` subclass as a class attribute, forming a tree of commands.
+
+The library uses [argparse](https://docs.python.org/3/library/argparse.html) under the hood. You get standard help formatting, long and short options, and consistent error handling without writing parser setup code by hand.
+
+
+## Quick start
+
+Subclass `MLArgParser` and define methods; their names become commands. Use type hints and defaults for arguments; use `arg_desc` to describe them in help.
+
 ```python
 #!/usr/bin/env python3
 
 from mlargparser import MLArgParser
 
-class MyApp (MLArgParser):
-  """ My Amazing App """
-  
-  argDesc = {
-    'arg1': 'arg1 description here',
-    'arg2': 'arg2 description here',
-    'arg3': 'arg3 description here',
-  }
 
-  def command1 (self, arg1: int, arg2: str, arg3: str = "default value"):
-    """ command1 description here """
-    if arg1 == 0:
-      print("arg2 = %s" % arg2)
-      print("arg3 = %s" % arg3)
+class MyApp(MLArgParser):
+    """My application."""
 
-if __name__ == '__main__':
-  MyApp()
+    arg_desc = {
+        "count": "Number of items",
+        "name": "Item name",
+        "format": "Output format",
+    }
+
+    def list_(self, count: int = 10, name: str = None):
+        """List items."""
+        print(f"count={count}, name={name}")
+
+    def run(self, format: str = "text"):
+        """Run the task."""
+        print(f"format={format}")
+
+
+if __name__ == "__main__":
+    MyApp()
 ```
 
-The above minimal example creates an application which has one possible command named "command1" which takes 2 required parameters of "arg1" (integer) and "arg2" (string), and an additional optional parameter of "arg3" (string).  
-If the user passes zero for arg1, then the values for arg2 and arg3 are both printed back to the user.  If you were to call the application with only --help or -h, the output would be as follows:
+Example invocations:
 
-```
-[user@localhost]: ~>$ ./myprog.py --help
-usage: ./myprog.py <command> [<args>]
-
-My Amazing App
-
-positional arguments:
-  command     Sub-command to run
-
-optional arguments:
-  -h, --help  show this help message and exit
-
-available commands:
-  command1      command1 description here
+```text
+./myapp.py --help
+./myapp.py list --count 5 --name foo
+./myapp.py run --format json
 ```
 
-If you get more specific and provide the required "command" positional parameter followed by --help or -h, the output would be as follows:
+Public method names are normalized for the CLI: underscores become dashes, and by default command names are lowercased (e.g. `list_` becomes `list`).
 
+
+## Commands and arguments
+
+### Commands
+
+Every public method (no leading `_`) is a command. The command name is derived from the method name: underscores are replaced with dashes, and by default the result is lowercased (e.g. `dump_config` becomes `dump-config`).
+
+### Argument types
+
+Parameter type hints determine how values are parsed and passed to your method:
+
+| Annotation   | CLI behavior                          |
+|-------------|----------------------------------------|
+| `str`       | One string (default if no annotation)  |
+| `int`       | One integer                           |
+| `float`     | One float                             |
+| `bool`      | Flag; see Boolean flags below         |
+| `list[T]`   | One or more values, collected as list |
+| `set[T]`    | One or more values, collected as set  |
+| `tuple[T, ...]` | One or more values, as tuple    |
+| `Optional[T]` / `Union[T, None]` | Unwraps to `T`        |
+
+Unannotated parameters and `None` are treated as `str`. Invalid or unresolved annotations are reported at startup when `strict_types=True` (default).
+
+### Required and optional
+
+- No default (or `inspect.Parameter.empty`) means the argument is **required**.
+- A default value makes the argument optional; the default is shown in help.
+
+### Argument descriptions
+
+Set `arg_desc` on your class (or subclass) to map parameter names to help strings:
+
+```python
+arg_desc = {
+    "count": "Number of items to process",
+    "output": "Output file path",
+}
 ```
-[user@localhost]: ~>$ ./myprog.py command1 --help
-usage: ./myprog.py command1 [<args>]
 
-command1 description here
+If a parameter is not in `arg_desc`, help uses the placeholder `FIXME: UNDOCUMENTED`. Subparsers merge their parent’s `arg_desc` with their own; local entries override the parent’s for the same key.
 
-optional arguments:
-  -h, --help            show this help message and exit
-  --arg3 ARG3           arg3 description here
 
-required arguments:
-  --arg1 ARG1, -a ARG1  arg1 description here
-  --arg2 ARG2           arg2 description here
+## Boolean flags
 
+Boolean parameters are turned into flags:
+
+- **Default `False`:** one flag that turns the value to `True` (e.g. `--verbose`).
+- **Default `True`:** one flag that turns it to `True` (redundant but explicit) and, by default, a `--no-<name>` flag that turns it to `False` (e.g. `--no-cache`).
+- **Parameter name starts with `no_`:** treated as the “off” side of a flag; the option is `--no-<rest>` and sets the *base* name to `False` (e.g. `no_cache` -> `--no-cache` and `dest` `cache`).
+
+You must not define both a `foo` and a `no_foo` parameter for the same logical flag; that is rejected as ambiguous. Set `auto_disable_flags = False` on your class to disable automatic `--no-*` generation for `True`-default booleans.
+
+
+## Subcommands (command trees)
+
+To add a subcommand level, assign an `MLArgParser` subclass as a **class attribute**. That class is then instantiated when the user selects that command; it parses the rest of `argv` and dispatches to its own commands.
+
+Example: one top-level command `dump` with subcommands `config`, `state`, and `authtoken`:
+
+```python
+class DumpCmd(MLArgParser):
+    """Dump subcommand."""
+
+    def config(self):
+        """Dump configuration."""
+        ...
+
+    def state(self):
+        """Dump state."""
+        ...
+
+    def authtoken(self):
+        """Dump auth token."""
+        ...
+
+
+class MyApp(MLArgParser):
+    """Main application."""
+    dump = DumpCmd
 ```
 
-Calling the application with the correct parameters is as you would expect:
+Invocation:
 
+```text
+./app.py dump config
+./app.py dump state
+./app.py dump authtoken
 ```
-[user@localhost]: ~>$ ./myprog.py command1 --arg1 0 --arg2 testing123
-arg2 = testing123
-arg3 = default value
+
+When the user runs `./app.py dump config`, the top-level parser sees the command `dump`, gets the class `DumpCmd`, and calls `DumpCmd(level=2, parent=app, top=app)`. That sub-parser then parses `config` and invokes `DumpCmd.config()`. You can nest further by assigning another parser class as an attribute of `DumpCmd`, and so on.
+
+Inside a subcommand, `self.parent` is the immediate parent parser instance and `self.top` is the root parser instance (e.g. `MyApp`), which is useful for sharing state or configuration.
+
+
+## Options (short and long)
+
+For each argument the library adds a long option `--<name>` (with underscores in the name turned into dashes). If the first character of the argument name is not already used by another argument, a short option `-<letter>` is also added. So for a parameter `verbose`, you get both `--verbose` and `-v` unless `-v` was already taken.
+
+
+## Configuration
+
+Set these as class attributes on your parser class (or subclass):
+
+| Attribute               | Default   | Description |
+|-------------------------|-----------|-------------|
+| `arg_desc`              | `None`    | Dict mapping parameter names to help strings. |
+| `auto_disable_flags`    | `True`    | If `True`, add `--no-<name>` for boolean parameters with default `True`. |
+| `case_sensitive_commands`| `False`   | If `True`, command names are not lowercased. |
+| `strict_validation`     | `True`    | If `True`, command name collisions and (when `strict_types` is also `True`) type validation errors are fatal. |
+| `strict_types`          | `True`    | If `True`, invalid or unresolved type annotations cause startup to fail; if `False`, they are reported as warnings. |
+
+Constructor:
+
+- `MLArgParser(level=1, parent=None, top=None, noparse=False, strict_types=True)`  
+  Normally you do not call this with custom `level`/`parent`/`top`; they are used internally for subcommands. Use `noparse=True` only in tests or when you need to set up the parser without parsing `sys.argv` (e.g. to build help or run a specific command programmatically).
+
+
+## Help output
+
+- The top-level description is the class docstring.
+- Each command’s description is that method’s docstring.
+- Each argument’s help comes from `arg_desc` or the undocumented placeholder.
+- Defaults are appended where applicable (e.g. `[default: "text"]`, `[enabled by default]`).
+
+
+## Testing
+
+Tests live under `tests/` and use the standard library `unittest`:
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 
-Licensing
-=========
-Unless otherwise noted, all the code in this repository is licensed under the LGPLv2 ONLY.  If you find yourself in the extraordinarily 
-unusual situation of needing to use my code under a more permissive license, send me an email, and we'll see if we can work something out.  I'm a pretty nice guy, so don't be 
-afraid to speak up (so long as you're polite).
+## License
+
+Unless otherwise noted, code in this repository is licensed under the LGPL v2 only. For use under a different license, contact the author.
+
+
+## References
+
+- [argparse](https://docs.python.org/3/library/argparse.html) — Python standard library.
+- [PEP 484](https://peps.python.org/pep-0484/) — Type hints.
+- Implementation inspired by [Multi-level argparse](https://chase-seibert.github.io/blog/2014/03/21/python-multilevel-argparse.html).

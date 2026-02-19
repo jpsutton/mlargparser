@@ -36,13 +36,121 @@ AST_TYPES = [list, tuple, dict, set]
 os.environ['COLUMNS'] = str(shutil.get_terminal_size().columns)
 
 
+class TypeValidator:
+    """Utility class for validating and normalizing type annotations."""
+    
+    @staticmethod
+    def is_bool_type(annotation):
+        """Check if annotation represents a boolean type."""
+        if annotation == bool:
+            return True
+        
+        # Handle Optional[bool]
+        origin = get_origin(annotation)
+        if origin is not None:
+            args = get_args(annotation)
+            if args:
+                non_none_args = [arg for arg in args if arg is not type(None)]
+                if len(non_none_args) == 1 and non_none_args[0] == bool:
+                    return True
+        
+        return False
+    
+    @staticmethod
+    def is_valid_annotation(annotation):
+        """
+        Check if annotation is valid for argument parsing.
+        
+        Returns:
+            tuple: (is_valid, error_message)
+        """
+        # Missing annotation is okay (defaults to str)
+        if annotation == inspect.Parameter.empty:
+            return True, None
+        
+        # None is okay (defaults to str)
+        if annotation is None:
+            return True, None
+        
+        # String annotations need special handling
+        if isinstance(annotation, str):
+            return False, f"String annotation '{annotation}' cannot be resolved. Use actual type."
+        
+        # Check if it's a type or callable
+        if not (callable(annotation) or hasattr(annotation, '__origin__')):
+            return False, f"Annotation {annotation} is neither a type nor callable"
+        
+        return True, None
+    
+    @staticmethod
+    def normalize_annotation(annotation):
+        """
+        Normalize annotation to a usable type.
+        
+        Returns the annotation or a default (str) if empty/None.
+        """
+        if annotation == inspect.Parameter.empty or annotation is None:
+            return str
+        
+        return annotation
+
+
 class CmdArg:
-    name = ""
-    desc = ""
-    type = None
-    required = False
-    action = ""
-    nargs = 1
+    def __resolve_string_annotation(self, annotation):
+        """Resolve a string annotation to an actual type."""
+        try:
+            import builtins
+            return getattr(builtins, annotation)
+        except AttributeError:
+            raise ValueError(f"Cannot resolve string annotation: {annotation}")
+    
+    def __normalize_typing_with_inspect(self, annotation):
+        """Normalize typing annotation using typing inspection utilities (Python 3.8+)."""
+        origin = get_origin(annotation)
+        if origin is None:
+            return None
+        
+        args = get_args(annotation)
+        
+        # Handle Optional[T] / Union[T, None]
+        try:
+            from typing import Union
+            if origin is Union and args:
+                # Get first non-None type
+                for arg in args:
+                    if arg is not type(None):
+                        return self.__normalize_type_annotation(arg)
+        except ImportError:
+            pass
+        
+        # Handle List[T], Set[T], Tuple[T], etc.
+        if origin in (list, set, tuple, dict):
+            if args:
+                return self.__normalize_type_annotation(args[0])
+            return origin
+        
+        return None
+    
+    def __normalize_typing_fallback(self, annotation):
+        """Normalize typing annotation using fallback method for older Python versions."""
+        origin = getattr(annotation, '__origin__', None)
+        args = getattr(annotation, '__args__', ())
+        
+        # Handle Optional[T] / Union[T, None]
+        if str(annotation).startswith('typing.Union') or str(annotation).startswith('typing.Optional'):
+            if args:
+                # Get first non-None type
+                for arg in args:
+                    if arg is not type(None):
+                        return self.__normalize_type_annotation(arg)
+        
+        # For List[T], Set[T], etc., extract T
+        if origin in (list, set, tuple, dict):
+            if args:
+                return self.__normalize_type_annotation(args[0])
+            return origin
+        
+        return None
     
     def __normalize_type_annotation(self, annotation):
         """
@@ -67,55 +175,17 @@ class CmdArg:
         
         # Handle string annotations (forward references)
         if isinstance(annotation, str):
-            # Try to evaluate in common namespaces
-            try:
-                import builtins
-                annotation = getattr(builtins, annotation)
-            except AttributeError:
-                raise ValueError(f"Cannot resolve string annotation: {annotation}")
+            annotation = self.__resolve_string_annotation(annotation)
         
         # Handle typing module types
-        # Use typing inspection utilities if available (Python 3.8+)
         if HAS_TYPING_INSPECT:
-            origin = get_origin(annotation)
-            if origin is not None:
-                args = get_args(annotation)
-                # Handle Optional[T] / Union[T, None]
-                # Optional[T] is equivalent to Union[T, None]
-                try:
-                    from typing import Union
-                    if origin is Union:
-                        if args:
-                            # Get first non-None type
-                            for arg in args:
-                                if arg is not type(None):
-                                    return self.__normalize_type_annotation(arg)
-                except ImportError:
-                    pass
-                
-                # Handle List[T], Set[T], Tuple[T], etc.
-                if origin in (list, set, tuple, dict):
-                    if args:
-                        return self.__normalize_type_annotation(args[0])
-                    return origin
+            result = self.__normalize_typing_with_inspect(annotation)
+            if result is not None:
+                return result
         elif hasattr(annotation, '__origin__'):
-            # Fallback for older Python versions or typing module without get_origin
-            origin = getattr(annotation, '__origin__', None)
-            args = getattr(annotation, '__args__', ())
-            
-            # Handle Optional[T] / Union[T, None]
-            if str(annotation).startswith('typing.Union') or str(annotation).startswith('typing.Optional'):
-                if args:
-                    # Get first non-None type
-                    for arg in args:
-                        if arg is not type(None):
-                            return self.__normalize_type_annotation(arg)
-            
-            # For List[T], Set[T], etc., extract T
-            if origin in (list, set, tuple, dict):
-                if args:
-                    return self.__normalize_type_annotation(args[0])
-                return origin
+            result = self.__normalize_typing_fallback(annotation)
+            if result is not None:
+                return result
         
         # Handle AST types
         if annotation in AST_TYPES:
@@ -203,50 +273,69 @@ class CmdArg:
         # Delegate to full normalization (string annotations, etc.)
         return self.__normalize_type_annotation(type_annotation)
     
+    def __setup_collection_type(self, signature, element_type):
+        """Setup parser for collection types (list, set, tuple)."""
+        try:
+            self.parser = self.__get_parser_for_type(element_type)
+        except ValueError as e:
+            raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
+        self.action = "append"
+        self.nargs = "+"
+        self.required = signature.default == inspect.Parameter.empty
+    
+    def __setup_boolean_type(self, signature, normalized_type):
+        """Setup parser for boolean types."""
+        self.parser = None
+        self.required = False
+        
+        if self.name.startswith("no_"):
+            self.action = "store_false"
+            if self.desc != STR_UNDOCUMENTED and signature.default is True:
+                base_name = self.name[3:]
+                self.desc = f"Explicitly disable {base_name.replace('_', ' ')}"
+        else:
+            self.action = "store_true"
+            if signature.default is True:
+                self.desc = f"{self.desc} [enabled by default]"
+            elif signature.default is False:
+                self.desc = f"{self.desc} [disabled by default]"
+    
+    def __setup_regular_type(self, signature):
+        """Setup parser for regular (non-collection, non-boolean) types."""
+        try:
+            self.parser = self.__get_parser_for_type(self.type)
+        except ValueError as e:
+            raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
+        self.action = "store"
+        self.required = signature.default == inspect.Parameter.empty
+        if signature.default != inspect.Parameter.empty:
+            self.desc += f' [default: "{signature.default}"]'
+    
     def __init__(self, signature, desc):
         self.name = signature.name
         self.type = signature.annotation
         self.desc = desc
 
+        # Validate the annotation
+        is_valid, error_msg = TypeValidator.is_valid_annotation(self.type)
+        if not is_valid:
+            raise ValueError(f"Invalid type annotation for parameter '{self.name}': {error_msg}")
+        
+        # Normalize the annotation
+        normalized_type = TypeValidator.normalize_annotation(self.type)
+
         # Check if it's a collection type (list, set, tuple)
         is_collection, origin, element_type = self.__is_collection_type(self.type)
 
         if is_collection:
-            try:
-                self.parser = self.__get_parser_for_type(element_type)
-            except ValueError as e:
-                raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
-            self.action = "append"
-            self.nargs = "+"
-            self.required = signature.default == inspect.Parameter.empty
-        elif self.type == bool:
-            # Boolean handling
-            self.parser = None
-            self.required = False
-            if self.name.startswith("no_"):
-                self.action = "store_false"
-                if self.desc != STR_UNDOCUMENTED and signature.default == True:
-                    base_name = self.name[3:]
-                    self.desc = f"Explicitly disable {base_name.replace('_', ' ')}"
-            else:
-                self.action = "store_true"
-                if signature.default == True:
-                    self.desc = f"{self.desc} [enabled by default]"
-                elif signature.default == False:
-                    self.desc = f"{self.desc} [disabled by default]"
+            self.__setup_collection_type(signature, element_type)
+        elif TypeValidator.is_bool_type(normalized_type):
+            self.__setup_boolean_type(signature, normalized_type)
         else:
-            # Regular type handling
-            try:
-                self.parser = self.__get_parser_for_type(self.type)
-            except ValueError as e:
-                raise ValueError(f"Invalid type annotation for parameter '{self.name}': {e}")
-            self.action = "store"
-            self.required = signature.default == inspect.Parameter.empty
-            if signature.default != inspect.Parameter.empty:
-                self.desc += f' [default: "{signature.default}"]'
+            self.__setup_regular_type(signature)
     
     def get_argparse_kwargs(self):
-        retval = {
+        kwargs = {
             'help': self.desc,
             'required': self.required,
             'dest': self.name,
@@ -254,17 +343,17 @@ class CmdArg:
         }
 
         if self.action in ("store", "append"):
-            retval['type'] = self.parser
+            kwargs['type'] = self.parser
 
         if self.action == "append":
-            retval['nargs'] = self.nargs
+            kwargs['nargs'] = self.nargs
 
         # Explicit disable boolean args should reference their enable flag value instead
-        if self.type == bool and self.name.startswith("no_"):
-            retval['dest'] = self.name[3:]
+        normalized_type = TypeValidator.normalize_annotation(self.type)
+        if TypeValidator.is_bool_type(normalized_type) and self.name.startswith("no_"):
+            kwargs['dest'] = self.name[3:]
 
-        return retval
-
+        return kwargs
 
 
 class MLArgParser:
@@ -289,7 +378,7 @@ class MLArgParser:
     """
     
     # mapping of command arguments to descriptions (initialized in constructor)
-    argDesc = None
+    arg_desc = None
     
     # mapping of lower-case commands to method names and attributes (initialized in __init_commands)
     commands = None
@@ -298,6 +387,26 @@ class MLArgParser:
     short_options = None
     
     auto_disable_flags = True
+    
+    # Set to True to make command names case-sensitive
+    case_sensitive_commands = False
+    
+    # Set to True to make command name collisions fatal
+    strict_validation = True
+    
+    def __merge_arg_desc(self):
+        """Merge arg_desc from parent with local arg_desc."""
+        if self.parent and self.parent.arg_desc:
+            combined_arg_desc = dict(self.parent.arg_desc)
+        else:
+            combined_arg_desc = dict()
+        
+        # combine any explicity-provided argument descriptions into the ones inherited from the parent
+        if self.arg_desc is not None:
+            for key, value in self.arg_desc.items():
+                combined_arg_desc[key] = value
+        
+        self.arg_desc = combined_arg_desc
     
     def __init__(self, level=1, parent=None, top=None, noparse=False, strict_types=True):
         # indicate how many command-levels deep we are
@@ -318,18 +427,8 @@ class MLArgParser:
         # build a dictionary of all commands
         self.__init_commands()
         
-        # try to inherit the argDesc dictionary from the parent
-        if self.parent and self.parent.argDesc:
-            combinedArgDesc = dict(self.parent.argDesc)
-        else:
-            combinedArgDesc = dict()
-        
-        # combine any explicity-provided argument descriptions into the ones inherited from the parent
-        if self.argDesc is not None:
-            for key, value in self.argDesc.items():
-                combinedArgDesc[key] = value
-        
-        self.argDesc = combinedArgDesc
+        # merge arg_desc from parent
+        self.__merge_arg_desc()
         
         # create our top-level parser
         self.parser = argparse.ArgumentParser(
@@ -342,7 +441,9 @@ class MLArgParser:
         self.parser.add_argument('command', help='Sub-command to run')
         
         # parse only the first argument after the current command
-        parsed_command = self.parser.parse_args(sys.argv[level:level + 1]).command.lower()
+        parsed_args = self.parser.parse_args(sys.argv[level:level + 1])
+        parsed_command_raw = parsed_args.command
+        parsed_command = self.__normalize_command_name(parsed_command_raw)
         
         # make sure it's a valid command and find the corresponding callable
         command_callable = self.__get_cmd_callable(parsed_command)
@@ -352,6 +453,49 @@ class MLArgParser:
         
         # invoke the callable for the command with all provided arguments
         command_callable(**callable_args)
+    
+    def __is_append_action(self, action, key):
+        """Check if an action is an append action for the given key."""
+        dest_match = getattr(action, 'dest', None) == key
+        nargs_match = getattr(action, 'nargs', None) == '+'
+        action_match = getattr(action, 'action', None) == 'append'
+        class_match = (hasattr(action, '__class__') and
+                      action.__class__.__name__.endswith('AppendAction'))
+        return dest_match and nargs_match and (action_match or class_match)
+    
+    def __flatten_list_argument(self, func_args, key, cmd_parser):
+        """Flatten nested list arguments for append actions."""
+        try:
+            action = next(
+                filter(lambda x: self.__is_append_action(x, key), cmd_parser._actions)
+            )
+        except StopIteration:
+            return  # Not an append action
+        
+        if not func_args[key]:
+            return
+        
+        if not isinstance(func_args[key], list):
+            type_name = type(func_args[key]).__name__
+            print(
+                f"Warning: Expected list for argument '{key}', got {type_name}",
+                file=sys.stderr
+            )
+            return
+        
+        flattened = []
+        for item in func_args[key]:
+            if isinstance(item, list):
+                flattened.extend(item)
+            else:
+                flattened.append(item)
+        
+        func_args[key] = flattened
+        if not flattened:
+            print(
+                f"Warning: Argument '{key}' resulted in empty list after flattening",
+                file=sys.stderr
+            )
     
     def __parse_cmd_args(self, command_callable):
         # intercept sub-commands
@@ -377,56 +521,173 @@ class MLArgParser:
                 func_args.pop(key)
                 continue
 
-            # Look for any append (list/set/tuple) arguments, and flatten nested lists
-            try:
-                action = next(
-                    filter(lambda x: (getattr(x, 'dest') == key and 
-                                     (getattr(x, 'nargs', None) == '+' or 
-                                      x.__class__.__name__.endswith('AppendAction'))),
-                           cmd_parser._actions)
-                )
-                if func_args[key] and isinstance(func_args[key], list):
-                    if func_args[key] and isinstance(func_args[key][0], list):
-                        func_args[key] = [item for sublist in func_args[key] for item in sublist]
-            except StopIteration:
-                pass
+            # Look for append (list/set/tuple) arguments with nargs="+" and flatten nested lists
+            self.__flatten_list_argument(func_args, key, cmd_parser)
         
         return func_args
     
+    def __generate_command_suggestions(self, parsed_command, available_commands):
+        """Generate command suggestions for unrecognized commands."""
+        suggestions = []
+        normalized_input = parsed_command.replace('-', '_').replace('_', '-')
+        
+        for cmd in available_commands:
+            normalized_cmd = cmd.replace('-', '_').replace('_', '-')
+            # Check if it's a close match (substring, prefix, etc.)
+            if (parsed_command in cmd or cmd in parsed_command or
+                normalized_input == normalized_cmd or
+                parsed_command.replace('-', '_') == cmd.replace('-', '_') or
+                parsed_command.replace('_', '-') == cmd.replace('_', '-')):
+                suggestions.append(cmd)
+        
+        return suggestions
+    
     def __get_cmd_callable(self, parsed_command):
         if parsed_command.startswith("_") or parsed_command not in list(self.commands.keys()):
-            print(('Unrecognized command: %s' % parsed_command))
+            # Try to find similar commands for helpful error message
+            available_commands = list(self.commands.keys())
+            suggestions = self.__generate_command_suggestions(parsed_command, available_commands)
+            
+            error_msg = f"Unrecognized command: {parsed_command}"
+            if suggestions:
+                suggestions_list = "\n  ".join(suggestions)
+                error_msg += f"\n\nDid you mean one of these?\n  {suggestions_list}"
+            
+            print(error_msg)
             self.parser.print_help()
-            exit(1)
+            sys.exit(1)
         
         # create a parser for the command
         return self.commands[parsed_command][1]
+    
+    def __normalize_command_name(self, name):
+        """
+        Normalize command name by replacing underscores with dashes.
+        
+        Args:
+            name: The method name to normalize
+            
+        Returns:
+            Normalized command name (lowercased if case_sensitive_commands is False)
+        """
+        normalized = name.replace('_', '-')
+        if self.case_sensitive_commands:
+            return normalized
+        else:
+            return normalized.lower()
+    
+    def __validate_command_signature(self, attr, attr_name):
+        """Validate a command's signature and return list of errors."""
+        command_errors = []
+        try:
+            sig = inspect.signature(attr)
+            self.__validate_boolean_params(sig, attr_name)
+            
+            for param_name, param in sig.parameters.items():
+                is_valid, error_msg = TypeValidator.is_valid_annotation(param.annotation)
+                if not is_valid:
+                    command_errors.append(
+                        f"Command '{attr_name}', parameter '{param_name}': {error_msg}"
+                    )
+            
+            # Also validate by creating CmdArg (catches other issues)
+            for param in sig.parameters.values():
+                try:
+                    param_desc = (self.arg_desc.get(param.name, STR_UNDOCUMENTED)
+                                 if self.arg_desc else STR_UNDOCUMENTED)
+                    CmdArg(param, param_desc)
+                except ValueError as e:
+                    command_errors.append(
+                        f"Command '{attr_name}', parameter '{param.name}': {e}"
+                    )
+        except Exception as e:
+            command_errors.append(
+                f"Command '{attr_name}': Failed to inspect signature: {e}"
+            )
+        
+        return command_errors
+    
+    def __record_command_collision(self, collisions, cmd_key, attr_name):
+        """Record a command name collision."""
+        if cmd_key not in collisions:
+            collisions[cmd_key] = [self.commands[cmd_key][0]]
+        collisions[cmd_key].append(attr_name)
+    
+    def __report_collisions(self, collisions):
+        """Report command name collisions."""
+        if not collisions:
+            return
+        
+        error_lines = ["Command name collisions detected:"]
+        for cmd_name, method_names in collisions.items():
+            error_lines.append(
+                f"  Command '{cmd_name}' maps to multiple methods: {', '.join(method_names)}"
+            )
+            error_lines.append(
+                f"    Only '{method_names[-1]}' will be accessible."
+            )
+        
+        error_report = "\n".join(error_lines)
+        print(error_report, file=sys.stderr)
+        
+        # Optionally make this fatal
+        if self.strict_validation:
+            raise ValueError(error_report)
+    
+    def __report_validation_errors(self, errors):
+        """Report type validation errors."""
+        if not errors:
+            return
+        
+        if self.strict_types:
+            error_report = "\n  - ".join(["Type validation errors:"] + errors)
+        else:
+            error_report = "\n  - ".join(["Warning: Type validation errors:"] + errors)
+        print(error_report, file=sys.stderr)
+        
+        # Optionally make this fatal
+        # strict_types controls whether type validation errors are fatal
+        if self.strict_types:
+            raise ValueError(error_report)
     
     def __init_commands(self):
         if self.commands:
             return
         
         self.commands = dict()
+        errors = []
+        collisions = {}  # Track collisions: normalized_name -> [method_names]
         
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
             
             if callable(attr) and not attr_name.startswith("_"):
-                # Validate command signatures early
-                if not isinstance(attr, type):  # Skip subcommand classes
-                    try:
-                        sig = inspect.signature(attr)
-                        self.__validate_boolean_params(sig, attr_name)
-                        for param in sig.parameters.values():
-                            # This will raise ValueError if annotation is invalid
-                            CmdArg(param, self.argDesc.get(param.name, STR_UNDOCUMENTED) if self.argDesc else STR_UNDOCUMENTED)
-                    except ValueError as e:
+                # Validate command signatures
+                if not isinstance(attr, type):
+                    command_errors = self.__validate_command_signature(attr, attr_name)
+                    
+                    # If there are errors for this command, add to errors list and skip adding command
+                    if command_errors:
+                        errors.extend(command_errors)
+                        # Skip adding this command if strict_types is True, or if we want to skip invalid commands
                         if self.strict_types:
-                            raise
-                        print(f"Warning: Skipping command '{attr_name}': {e}", file=sys.stderr)
+                            continue
+                        # In non-strict mode, we still skip commands with validation errors to avoid crashes later
                         continue
                 
-                self.commands[attr_name.lower()] = (attr_name, attr)
+                # Normalize command name
+                cmd_key = self.__normalize_command_name(attr_name)
+                
+                # Check for collision
+                if cmd_key in self.commands:
+                    self.__record_command_collision(collisions, cmd_key, attr_name)
+                
+                # Store the command (will overwrite if collision)
+                self.commands[cmd_key] = (attr_name, attr)
+        
+        # Report collisions and errors
+        self.__report_collisions(collisions)
+        self.__report_validation_errors(errors)
     
     def __validate_boolean_params(self, signature, command_name):
         """Validate boolean parameter naming to avoid conflicts."""
@@ -434,8 +695,9 @@ class MLArgParser:
         
         for param_name in param_names:
             param = signature.parameters[param_name]
+            normalized_type = TypeValidator.normalize_annotation(param.annotation)
             
-            if param.annotation == bool:
+            if TypeValidator.is_bool_type(normalized_type):
                 if param_name.startswith("no_no_"):
                     raise ValueError(
                         f"Parameter '{param_name}' uses double negative 'no_no_' prefix. "
@@ -458,7 +720,7 @@ class MLArgParser:
         cmd_list = list()
         
         # build a list of all commands with descriptions
-        for (cmd_name, attr) in self.commands.values():
+        for cmd_name, attr in self.commands.values():
             desc = inspect.getdoc(attr)
             
             if not desc:
@@ -468,7 +730,7 @@ class MLArgParser:
         
         # determine the max width for the commands column
         if len(cmd_list):
-            col_width = max(len(cmd) for cmd in list([x[0] for x in cmd_list])) + 6
+            col_width = max(len(x[0]) for x in cmd_list) + 6
             
             # format each command row
             for row in cmd_list:
@@ -504,14 +766,20 @@ class MLArgParser:
         param_names = set(sig.parameters.keys())
         
         for arg in sig.parameters.values():
-            if self.argDesc is None or arg.name not in self.argDesc:
+            if self.arg_desc is None or arg.name not in self.arg_desc:
                 desc = STR_UNDOCUMENTED
             else:
-                desc = self.argDesc[arg.name]
+                desc = self.arg_desc[arg.name]
             
             yield CmdArg(arg, desc), arg.default
             
-            if self.auto_disable_flags and arg.annotation == bool and arg.default == True:
+            normalized_type = TypeValidator.normalize_annotation(arg.annotation)
+            is_bool_with_true_default = (
+                self.auto_disable_flags and
+                TypeValidator.is_bool_type(normalized_type) and
+                arg.default is True
+            )
+            if is_bool_with_true_default:
                 no_name = f"no_{arg.name}"
                 
                 if no_name in param_names:
@@ -528,17 +796,41 @@ class MLArgParser:
                 
                 yield CmdArg(arg.replace(name=no_name), desc), None
     
+    def __validate_argdesc(self, command_callable):
+        """Validate that arg_desc keys match actual parameter names."""
+        if self.arg_desc is None:
+            return
+        
+        sig = inspect.signature(command_callable)
+        param_names = set(sig.parameters.keys())
+        argdesc_keys = set(self.arg_desc.keys())
+        
+        # Find keys in arg_desc that don't match any parameter
+        unknown_keys = argdesc_keys - param_names
+        
+        if unknown_keys:
+            print(
+                f"Warning: arg_desc contains keys that don't match any parameters: {unknown_keys}",
+                file=sys.stderr
+            )
+    
     def __get_cmd_parser(self, command_callable):
+        # Validate arg_desc keys
+        self.__validate_argdesc(command_callable)
+        
         # Offset the level from the one passed to the constructor (to skip parsing the previous command)
         level = self.level + 1
         
         # create a parser for the command and a group to track required args
+        # Build usage string safely - ensure we have enough argv elements
+        argv_slice = sys.argv[0:level] if len(sys.argv) >= level else sys.argv
+        usage_str = (("%s " * len(argv_slice)) + "[<args>]") % tuple(argv_slice)
         parser = argparse.ArgumentParser(
             description=inspect.getdoc(command_callable),
-            usage=(("%s " * level) + "[<args>]") % tuple(sys.argv[0:level]),
+            usage=usage_str,
             exit_on_error=False  # New in Python 3.9
         )
-        req_args_grp = parser.add_argument_group("required arguments")
+        req_args_group = parser.add_argument_group("required arguments")
         defaults = dict()
         
         # populate the parser with the arg and type information from the function
@@ -550,13 +842,13 @@ class MLArgParser:
             kwargs = arg.get_argparse_kwargs()
             
             # determine which group to place an argument in based on whether or not it's required
-            grp = req_args_grp if arg.required else parser
+            grp = req_args_group if arg.required else parser
             
             # add the argument to the appropriate group
             grp.add_argument(*options, **kwargs)
 
             # build a list of default args for the parser object
-            if default_val not in (None, inspect._empty):
+            if default_val not in (None, inspect.Parameter.empty):
                 defaults[arg.name] = default_val
 
         # set default values
