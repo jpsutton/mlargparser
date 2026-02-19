@@ -34,8 +34,8 @@ class MyApp(MLArgParser):
         "format": "Output format",
     }
 
-    def list_(self, count: int = 10, name: str = None):
-        """List items."""
+    def show(self, count: int = 10, name: str = None):
+        """Show items."""
         print(f"count={count}, name={name}")
 
     def run(self, format: str = "text"):
@@ -51,11 +51,11 @@ Example invocations:
 
 ```text
 ./myapp.py --help
-./myapp.py list --count 5 --name foo
+./myapp.py show --count 5 --name foo
 ./myapp.py run --format json
 ```
 
-Public method names are normalized for the CLI: underscores become dashes, and by default command names are lowercased (e.g. `list_` becomes `list`).
+Public method names are normalized for the CLI: underscores become dashes, and by default command names are lowercased.
 
 
 ## Commands and arguments
@@ -173,6 +173,40 @@ Constructor:
 
 - `MLArgParser(level=1, parent=None, top=None, noparse=False, strict_types=True)`  
   Normally you do not call this with custom `level`/`parent`/`top`; they are used internally for subcommands. Use `noparse=True` only in tests or when you need to set up the parser without parsing `sys.argv` (e.g. to build help or run a specific command programmatically).
+
+
+## Bash completion
+
+Optional bash/zsh tab completion is provided via [argcomplete](https://github.com/kislyuk/argcomplete). Install the extra and enable it in your script:
+
+```bash
+pip install mlargparser[argcomplete]
+```
+
+```python
+# PYTHON_ARGCOMPLETE_OK
+from mlargparser import MLArgParser
+import mlargparser_argcomplete
+mlargparser_argcomplete.install()
+
+class MyApp(MLArgParser):
+    ...
+
+if __name__ == "__main__":
+    MyApp()
+```
+
+For global completion (any script with `PYTHON_ARGCOMPLETE_OK` is completed without per-command registration), run once:
+
+```bash
+activate-global-python-argcomplete
+```
+
+To register a single command instead:
+
+```bash
+eval "$(register-python-argcomplete myapp)"
+```
 
 
 ## Help output

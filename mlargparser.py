@@ -796,28 +796,7 @@ class MLArgParser:
                 
                 yield CmdArg(arg.replace(name=no_name), desc), None
     
-    def __validate_argdesc(self, command_callable):
-        """Validate that arg_desc keys match actual parameter names."""
-        if self.arg_desc is None:
-            return
-        
-        sig = inspect.signature(command_callable)
-        param_names = set(sig.parameters.keys())
-        argdesc_keys = set(self.arg_desc.keys())
-        
-        # Find keys in arg_desc that don't match any parameter
-        unknown_keys = argdesc_keys - param_names
-        
-        if unknown_keys:
-            print(
-                f"Warning: arg_desc contains keys that don't match any parameters: {unknown_keys}",
-                file=sys.stderr
-            )
-    
     def __get_cmd_parser(self, command_callable):
-        # Validate arg_desc keys
-        self.__validate_argdesc(command_callable)
-        
         # Offset the level from the one passed to the constructor (to skip parsing the previous command)
         level = self.level + 1
         

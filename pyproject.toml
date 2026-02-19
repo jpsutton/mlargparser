@@ -13,6 +13,9 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+argcomplete = ["argcomplete"]
+
 [project.urls]
 "Homepage" = "https://github.com/jpsutton/mlargparser"
 "Bug Tracker" = "https://github.com/jpsutton/mlargparser/issues"
