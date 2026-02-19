@@ -4,7 +4,7 @@ version = "1.1"
 authors = [
   { name="Jared Sutton", email="jpsutton@gmail.com" },
 ]
-description = "A multi-Level argument parser library for writing CLI-based applications"
+description = "An easy-to-use multi-Level argument parser library for writing CLI-based applications"
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
