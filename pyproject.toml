@@ -4,14 +4,18 @@ version = "1.1"
 authors = [
   { name="Jared Sutton", email="jpsutton@gmail.com" },
 ]
-description = "An easy-to-use multi-Level argument parser library for writing CLI-based applications"
+description = "A multi-Level argument parser library for writing CLI-based applications"
 readme = "README.md"
+license = "LGPL-2.0"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: GNU Lesser General Public License v2 (LGPLv2)",
     "Operating System :: OS Independent",
 ]
+
+# Explicit modules: avoid "multiple top-level modules" error with flat layout
+[tool.setuptools]
+py-modules = ["mlargparser", "mlargparser_argcomplete"]
 
 [project.optional-dependencies]
 argcomplete = ["argcomplete"]
