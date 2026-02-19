@@ -1,0 +1,33 @@
+# Build and publish to PyPI when pyproject.toml changes (e.g. version bump).
+# Add a PyPI API token as repository secret PYPI_API_TOKEN, or use Trusted Publishing:
+#   https://docs.pypi.org/trusted-publishers/
+
+name: Publish to PyPI
+
+on:
+  push:
+    branches: [main]
+    paths: ['pyproject.toml']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*
